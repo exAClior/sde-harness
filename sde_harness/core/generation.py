@@ -1,6 +1,6 @@
 import asyncio
 import threading
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 import yaml
 from copy import deepcopy
 import gc
@@ -11,6 +11,72 @@ import weave
 from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
 import torch
 import litellm
+
+
+def _get_message_field(message: Any, field: str) -> Any:
+    if message is None:
+        return None
+    if isinstance(message, dict):
+        return message.get(field)
+    return getattr(message, field, None)
+
+
+def _extract_text_and_reasoning_from_message(
+    message: Any,
+) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Best-effort extraction across providers/SDK shapes.
+
+    Returns:
+        (text, reasoning)
+    """
+    content = _get_message_field(message, "content")
+    reasoning = None
+
+    # Common LiteLLM / provider-specific fields.
+    for field in ("reasoning_content", "reasoning", "thinking", "thoughts"):
+        candidate = _get_message_field(message, field)
+        if isinstance(candidate, str) or candidate is None:
+            if candidate is not None:
+                reasoning = candidate
+                break
+
+    # Some providers return structured content blocks.
+    if isinstance(content, list):
+        text_parts: List[str] = []
+        reasoning_parts: List[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                item_type = item.get("type")
+                if item_type in ("text", "output_text"):
+                    text_value = item.get("text")
+                    if isinstance(text_value, str):
+                        text_parts.append(text_value)
+                elif item_type in ("thinking", "reasoning"):
+                    thinking_value = item.get("thinking") or item.get("text")
+                    if isinstance(thinking_value, str):
+                        reasoning_parts.append(thinking_value)
+            else:
+                item_type = getattr(item, "type", None)
+                if item_type in ("text", "output_text"):
+                    text_value = getattr(item, "text", None)
+                    if isinstance(text_value, str):
+                        text_parts.append(text_value)
+                elif item_type in ("thinking", "reasoning"):
+                    thinking_value = getattr(item, "thinking", None) or getattr(item, "text", None)
+                    if isinstance(thinking_value, str):
+                        reasoning_parts.append(thinking_value)
+
+        text = "".join(text_parts).strip() if text_parts else None
+        if reasoning is None and reasoning_parts:
+            reasoning = "".join(reasoning_parts).strip()
+        return text, reasoning
+
+    if isinstance(content, str) or content is None:
+        return content, reasoning
+
+    # Preserve a usable string for unexpected SDK/provider shapes.
+    return str(content), reasoning
 
 
 def load_models_and_credentials(models_file="models.yaml", credentials_file="credentials.yaml"):
@@ -290,9 +356,11 @@ class Generation:
             )
         except Exception as e:
             raise RuntimeError(f"LiteLLM generation failed for model {model_name}") from e
-        
-        text = response.choices[0].message.content
-        return {
+
+        text, reasoning = _extract_text_and_reasoning_from_message(response.choices[0].message)
+        if text is None:
+            text = ""
+        result: Dict[str, Any] = {
             "model_name": model_name,
             "provider": model_config["provider"],
             "model": model_config["model"],
@@ -300,6 +368,9 @@ class Generation:
             "usage": response.usage.model_dump() if response.usage else None,
             "finish_reason": response.choices[0].finish_reason,
         }
+        if reasoning is not None:
+            result["reasoning"] = reasoning
+        return result
     
     @weave.op()
     def _generate_hf(

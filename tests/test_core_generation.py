@@ -216,6 +216,23 @@ class TestGeneration(unittest.TestCase):
 
     @patch('sde_harness.core.generation.load_models_and_credentials')
     @patch('sde_harness.core.generation.litellm')
+    def test_generate_litellm_includes_reasoning(self, mock_litellm, mock_load):
+        """Test that reasoning is returned when provided by the model."""
+        mock_load.return_value = (self.sample_models, self.sample_credentials)
+
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = "Generated text"
+        mock_response.choices[0].message.reasoning_content = "Reasoning text"
+        mock_litellm.completion.return_value = mock_response
+
+        gen = Generation()
+        result = gen.generate("Test prompt", model_name="test/model")
+
+        self.assertEqual(result.get("reasoning"), "Reasoning text")
+
+    @patch('sde_harness.core.generation.load_models_and_credentials')
+    @patch('sde_harness.core.generation.litellm')
     def test_generate_litellm_failure(self, mock_litellm, mock_load):
         """Test generation failure with litellm"""
         mock_load.return_value = (self.sample_models, self.sample_credentials)
