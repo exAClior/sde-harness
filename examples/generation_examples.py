@@ -40,11 +40,11 @@ def basic_usage_example():
                     max_tokens=200,
                     temperature=0.7,
                 )
-                print(f"Provider: {result['provider']}")
-                print(f"Model: {result['model']}")
-                print(f"Response: {result['text'][:200]}...")
-                if result["usage"]:
-                    print(f"Usage: {result['usage']}")
+                print(f"Provider: {result['metadata']['provider']}")
+                print(f"Model: {result['metadata']['model']}")
+                print(f"Response: {result['output']['text'][:200]}...")
+                if result["metadata"]["usage"]:
+                    print(f"Usage: {result['metadata']['usage']}")
             except Exception as e:
                 print(f"Error with {model_name}: {e}")
 
@@ -84,9 +84,9 @@ async def async_batch_example():
             # Display results
             for i, result in enumerate(results):
                 print(f"\nPrompt {i+1}: {prompts[i]}")
-                print(f"Response: {result['text'][:100]}...")
+                print(f"Response: {result['output']['text'][:100]}...")
                 print(
-                    f"Tokens used: {result['usage']['total_tokens'] if result['usage'] else 'N/A'}"
+                    f"Tokens used: {result['metadata']['usage']['total_tokens'] if result['metadata']['usage'] else 'N/A'}"
                 )
 
         except Exception as e:
@@ -123,10 +123,10 @@ def chat_conversation_example():
                 max_tokens=200,
             )
 
-            print(f"AI: {result['text']}")
+            print(f"AI: {result['output']['text']}")
 
             # Add AI response to conversation
-            messages.append({"role": "assistant", "content": result["text"]})
+            messages.append({"role": "assistant", "content": result["output"]["text"]})
 
             # Follow-up question
             messages.append(
@@ -140,7 +140,7 @@ def chat_conversation_example():
                 messages=messages, model_name="openai/gpt-4o-2024-08-06", max_tokens=200
             )
 
-            print(f"AI: {result['text']}")
+            print(f"AI: {result['output']['text']}")
 
         except Exception as e:
             print(f"Conversation failed: {e}")
@@ -178,9 +178,9 @@ def model_comparison_example():
                 )
 
                 print(f"--- {model_name.upper()} ---")
-                print(result["text"])
+                print(result["output"]["text"])
                 print(
-                    f"(Provider: {result['provider']}, Finish reason: {result.get('finish_reason', 'N/A')})"
+                    f"(Provider: {result['metadata']['provider']}, Finish reason: {result['metadata'].get('finish_reason', 'N/A')})"
                 )
                 print()
 
@@ -215,8 +215,8 @@ def huggingface_example():
                     prompt=prompt, model_name=model_name, max_tokens=50, temperature=0.7
                 )
 
-                print(f"Response: {result['text']}")
-                print(f"Provider: {result['provider']}")
+                print(f"Response: {result['output']['text']}")
+                print(f"Provider: {result['metadata']['provider']}")
                 print()
 
             except Exception as e:

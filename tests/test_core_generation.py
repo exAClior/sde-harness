@@ -229,7 +229,7 @@ class TestGeneration(unittest.TestCase):
         gen = Generation()
         result = gen.generate("Test prompt", model_name="test/model")
 
-        self.assertEqual(result.get("reasoning"), "Reasoning text")
+        self.assertEqual(result["output"]["reasoning"], "Reasoning text")
 
     @patch('sde_harness.core.generation.load_models_and_credentials')
     @patch('sde_harness.core.generation.litellm')

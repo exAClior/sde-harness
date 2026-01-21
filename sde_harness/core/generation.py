@@ -8,8 +8,17 @@ import gc
 import weave
 
 # API clients
-from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
-import torch
+try:
+    from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
+except Exception:  # pragma: no cover
+    AutoTokenizer = None
+    AutoModelForCausalLM = None
+    pipeline = None
+
+try:
+    import torch
+except Exception:  # pragma: no cover
+    torch = None
 import litellm
 
 
@@ -135,11 +144,14 @@ def validate_device(device):
     Returns:
         str: Valid device string
     """
+    # Only needed for local HF models; keep remote providers usable without torch.
+    if torch is None:
+        return "cpu"
+
     if device is None:
         if torch.cuda.is_available():
             return "cuda"
-        else:
-            return "cpu"
+        return "cpu"
     elif isinstance(device, int):
         if torch.cuda.is_available() and device < torch.cuda.device_count():
             return f"cuda:{device}"
@@ -229,12 +241,17 @@ class Generation:
         self.hf_model_name = None
         
         # Force garbage collection to free GPU memory
-        if torch.cuda.is_available():
+        if torch is not None and torch.cuda.is_available():
             torch.cuda.empty_cache()
         gc.collect()
 
     def _load_hf_model_and_tokenizer(self, model_name):
         """Load HuggingFace model with proper error handling and cleanup."""
+        if torch is None or AutoModelForCausalLM is None or AutoTokenizer is None or pipeline is None:
+            raise RuntimeError(
+                "Local Hugging Face models require 'torch' and 'transformers'. "
+                "Install them (e.g. pip install torch transformers) or use a non-local provider via LiteLLM."
+            )
         with self._model_lock:  # Thread safety
             if self.hf_model_name == model_name and self.hf_model is not None:
                 return  # Model already loaded
@@ -361,15 +378,18 @@ class Generation:
         if text is None:
             text = ""
         result: Dict[str, Any] = {
-            "model_name": model_name,
-            "provider": model_config["provider"],
-            "model": model_config["model"],
-            "text": text,
-            "usage": response.usage.model_dump() if response.usage else None,
-            "finish_reason": response.choices[0].finish_reason,
+            "output": {
+                "text": text,
+                "reasoning": reasoning,
+            },
+            "metadata": {
+                "model_name": model_name,
+                "provider": model_config["provider"],
+                "model": model_config["model"],
+                "usage": response.usage.model_dump() if response.usage else None,
+                "finish_reason": response.choices[0].finish_reason,
+            },
         }
-        if reasoning is not None:
-            result["reasoning"] = reasoning
         return result
     
     @weave.op()
@@ -383,6 +403,9 @@ class Generation:
         Internal method to generate text using a Hugging Face model.
         """
         self._load_hf_model_and_tokenizer(model_config["model"])
+
+        if self.hf_tokenizer is None or self.generator is None:
+            raise RuntimeError("HuggingFace model/tokenizer not initialized")
 
         max_tokens = kwargs.get("max_tokens", None)
         max_length = None
@@ -413,11 +436,15 @@ class Generation:
             new_text = generated[len(prompt):].strip()
             
             return {
-                "model_name": model_config["model_name"],
-                "provider": model_config["provider"],
-                "model": model_config["model"],
-                "text": new_text,
-                # "usage": None,
+                "output": {
+                    "text": new_text,
+                    "reasoning": None,
+                },
+                "metadata": {
+                    "model_name": model_config["model_name"],
+                    "provider": model_config["provider"],
+                    "model": model_config["model"],
+                },
             }
         except Exception as e:
             raise RuntimeError(f"HuggingFace generation failed for model {model_config['model']}: {e}")
@@ -491,7 +518,7 @@ if __name__ == "__main__":
                     print(f"\nTesting {model}:")
                     results = await gen.generate_batch_async(prompts, model_name=model)
                     for i, res in enumerate(results):
-                        print(f"  Prompt {i}: {res['text'][:5000]}...")
+                        print(f"  Prompt {i}: {res['output']['text'][:5000]}...")
                 except Exception as e:
                     print(f"  Error with {model}: {e}")
                     raise e

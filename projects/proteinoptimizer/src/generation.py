@@ -36,8 +36,8 @@ class ProteinGeneration(Generation):
         **kwargs,
     ) -> Union[str, Dict[str, str]]:
         result = super().generate(prompt=prompt, messages=messages, model_name=model_name, **kwargs)
-        if isinstance(result, dict) and "text" in result:
-            return result["text"]
+        if isinstance(result, dict) and "output" in result:
+            return result["output"]["text"]
         return result
 
     # ------------------------------------------------------------------

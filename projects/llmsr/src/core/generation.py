@@ -29,8 +29,8 @@ class LLMSRGeneration(Generation):
     def generate_equation(self, prompt: str, **kwargs) -> Union[str, Dict[str, str]]:
         """Generate equation code from prompt."""
         result = self.generate(prompt=prompt, **kwargs)
-        if isinstance(result, dict) and "text" in result:
-            return result["text"]
+        if isinstance(result, dict) and "output" in result:
+            return result["output"]["text"]
         return result
 
     def parse_equation_code(self, response: Union[str, List[str]]) -> List[str]:

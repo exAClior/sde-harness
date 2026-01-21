@@ -141,7 +141,7 @@ class ParetoOptimizer(ProteinOptimizer):
                     temperature=0.8,
                     max_tokens=len(seq) + 50,  # More room for box etc.
                 )
-                text = response["text"].strip()
+                text = response["output"]["text"].strip()
 
                 # 1. Look for \box{SEQUENCE}
                 import re

@@ -32,8 +32,8 @@ class ProteinOracle(Oracle):
         SDE-Harness compatible evaluate method. The workflow calls this method.
         It expects the response to be a dictionary containing the sequence.
         """
-        if isinstance(response, dict) and "text" in response:
-            sequence = response["text"]
+        if isinstance(response, dict) and "output" in response:
+            sequence = response["output"]["text"]
         elif isinstance(response, str):
             sequence = response
         else:
