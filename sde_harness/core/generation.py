@@ -376,6 +376,14 @@ class Generation:
             **kwargs,
         )
 
+    def _is_openai_o_series(self, model_id: str) -> bool:
+        """Check if model is an OpenAI o-series reasoning model."""
+        model_lower = model_id.lower()
+        # Match o1, o3, o4, o4-mini etc. but not "gpt-4o" (which has 4o not o4)
+        import re
+
+        return bool(re.search(r"/(o[134]|o[134]-)", model_lower))
+
     @weave.op()
     def _generate_litellm(
         self,
@@ -394,13 +402,17 @@ class Generation:
             if k not in kwargs:
                 kwargs[k] = v
 
-        # Handle O-series models which have specific parameter requirements
         model_id = f"{model_config['provider']}/{model_config['model']}"
-        if any(o_model in model_id.lower() for o_model in ["o1", "o2", "o3", "o4"]):
-            # O-series models only support temperature=1
-            kwargs["temperature"] = 1.0
-            # Drop unsupported parameters to avoid errors
-            kwargs["drop_params"] = True
+
+        # Use Responses API for OpenAI o-series models to get reasoning summaries
+        if self._is_openai_o_series(model_id):
+            return self._generate_openai_responses_api(
+                model_config=model_config,
+                model_id=model_id,
+                prompt=prompt,
+                messages=messages,
+                **kwargs,
+            )
 
         if messages is None:
             if prompt is None:
@@ -435,6 +447,103 @@ class Generation:
                 "model": model_config["model"],
                 "usage": response.usage.model_dump() if response.usage else None,
                 "finish_reason": response.choices[0].finish_reason,
+            },
+        }
+        return result
+
+    def _generate_openai_responses_api(
+        self,
+        model_config,
+        model_id: str,
+        prompt: Optional[str] = None,
+        messages: Optional[List[Dict[str, str]]] = None,
+        **kwargs,
+    ) -> Dict[str, Any]:
+        """
+        Generate using OpenAI Responses API for o-series models.
+        This allows access to reasoning summaries.
+        """
+        model_name = model_config["model_name"]
+
+        # Build input for Responses API
+        if messages is not None:
+            # Convert messages to input format
+            input_content = messages
+        elif prompt is not None:
+            input_content = prompt
+        else:
+            raise ValueError("Either prompt or messages must be provided")
+
+        # Convert max_tokens to max_output_tokens for Responses API
+        max_output_tokens = kwargs.pop("max_tokens", None)
+        if max_output_tokens:
+            kwargs["max_output_tokens"] = max_output_tokens
+
+        # Remove unsupported params for Responses API
+        kwargs.pop("temperature", None)
+        kwargs.pop("drop_params", None)
+
+        try:
+            response = litellm.responses(
+                model=model_id,
+                input=input_content,
+                reasoning={"summary": "detailed"},
+                **model_config["credentials"],
+                **kwargs,
+            )
+        except Exception as e:
+            raise RuntimeError(
+                f"LiteLLM Responses API failed for model {model_name}"
+            ) from e
+
+        # Extract text and reasoning from Responses API output
+        text = ""
+        reasoning = None
+
+        for item in response.output:
+            if item.type == "reasoning":
+                # Extract reasoning summary
+                if item.summary:
+                    reasoning_parts = []
+                    for summary in item.summary:
+                        if hasattr(summary, "text") and summary.text:
+                            reasoning_parts.append(summary.text)
+                    if reasoning_parts:
+                        reasoning = "\n".join(reasoning_parts)
+            elif item.type == "message":
+                # Extract output text
+                for content in item.content:
+                    if hasattr(content, "text") and content.text:
+                        text += content.text
+
+        # Build usage dict
+        usage = None
+        if response.usage:
+            try:
+                usage = {
+                    "prompt_tokens": response.usage.input_tokens,
+                    "completion_tokens": response.usage.output_tokens,
+                    "total_tokens": response.usage.total_tokens,
+                    "reasoning_tokens": (
+                        response.usage.output_tokens_details.reasoning_tokens
+                        if response.usage.output_tokens_details
+                        else None
+                    ),
+                }
+            except Exception:
+                pass
+
+        result: Dict[str, Any] = {
+            "output": {
+                "text": text,
+                "reasoning": reasoning,
+            },
+            "metadata": {
+                "model_name": model_name,
+                "provider": model_config["provider"],
+                "model": model_config["model"],
+                "usage": usage,
+                "finish_reason": response.status,
             },
         }
         return result
