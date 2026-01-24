@@ -42,13 +42,35 @@ def _extract_text_and_reasoning_from_message(
     content = _get_message_field(message, "content")
     reasoning = None
 
+    # Try to get message as dict for more reliable field access
+    msg_dict = None
+    if hasattr(message, "model_dump"):
+        msg_dict = message.model_dump()
+    elif isinstance(message, dict):
+        msg_dict = message
+
     # Common LiteLLM / provider-specific fields.
     for field in ("reasoning_content", "reasoning", "thinking", "thoughts"):
+        # Try getattr first
         candidate = _get_message_field(message, field)
-        if isinstance(candidate, str) or candidate is None:
-            if candidate is not None:
-                reasoning = candidate
-                break
+        # Also try dict access if available
+        if candidate is None and msg_dict:
+            candidate = msg_dict.get(field)
+        if isinstance(candidate, str) and candidate:
+            reasoning = candidate
+            break
+
+    # Check provider_specific_fields for reasoning_content (OpenAI-compatible proxies)
+    if reasoning is None:
+        provider_fields = _get_message_field(message, "provider_specific_fields")
+        if provider_fields is None and msg_dict:
+            provider_fields = msg_dict.get("provider_specific_fields")
+        if isinstance(provider_fields, dict):
+            for field in ("reasoning_content", "reasoning", "thinking"):
+                candidate = provider_fields.get(field)
+                if isinstance(candidate, str) and candidate:
+                    reasoning = candidate
+                    break
 
     # Some providers return structured content blocks.
     if isinstance(content, list):
@@ -72,7 +94,9 @@ def _extract_text_and_reasoning_from_message(
                     if isinstance(text_value, str):
                         text_parts.append(text_value)
                 elif item_type in ("thinking", "reasoning"):
-                    thinking_value = getattr(item, "thinking", None) or getattr(item, "text", None)
+                    thinking_value = getattr(item, "thinking", None) or getattr(
+                        item, "text", None
+                    )
                     if isinstance(thinking_value, str):
                         reasoning_parts.append(thinking_value)
 
@@ -88,7 +112,9 @@ def _extract_text_and_reasoning_from_message(
     return str(content), reasoning
 
 
-def load_models_and_credentials(models_file="models.yaml", credentials_file="credentials.yaml"):
+def load_models_and_credentials(
+    models_file="models.yaml", credentials_file="credentials.yaml"
+):
     """Load configuration files with proper error handling."""
     try:
         with open(models_file, "r") as f:
@@ -99,17 +125,19 @@ def load_models_and_credentials(models_file="models.yaml", credentials_file="cre
         raise FileNotFoundError(f"Models configuration file not found: {models_file}")
     except yaml.YAMLError as e:
         raise ValueError(f"Invalid YAML in models file {models_file}: {e}")
-    
+
     try:
         with open(credentials_file, "r") as f:
             credentials = yaml.safe_load(f)
         if credentials is None:
             credentials = {}  # Allow empty credentials file
     except FileNotFoundError:
-        raise FileNotFoundError(f"Credentials configuration file not found: {credentials_file}")
+        raise FileNotFoundError(
+            f"Credentials configuration file not found: {credentials_file}"
+        )
     except yaml.YAMLError as e:
         raise ValueError(f"Invalid YAML in credentials file {credentials_file}: {e}")
-    
+
     return models, credentials
 
 
@@ -118,16 +146,18 @@ def load_model_config(model_name, models, credentials):
         model_config = deepcopy(models[model_name])
     except KeyError:
         raise KeyError(f"Model `{model_name}` not found in models_file")
-    
+
     credentials_config = {}
-    if 'credentials' in model_config:
+    if "credentials" in model_config:
         credentials_tag = model_config["credentials"]
         if credentials_tag is not None:
             try:
                 credentials_config = credentials[credentials_tag]
             except KeyError:
-                raise KeyError(f"Credentials `{credentials_tag}` not found in credentials_file")
-    
+                raise KeyError(
+                    f"Credentials `{credentials_tag}` not found in credentials_file"
+                )
+
     model_config["model_name"] = model_name
     model_config["credentials"] = credentials_config
 
@@ -137,10 +167,10 @@ def load_model_config(model_name, models, credentials):
 def validate_device(device):
     """
     Validate and return the appropriate device configuration.
-    
+
     Args:
         device: Device specification (str or int or None)
-        
+
     Returns:
         str: Valid device string
     """
@@ -171,10 +201,10 @@ def validate_device(device):
 
 class Generation:
     """
-    A unified generator supporting OpenAI (GPT-4o, GPT-4, etc.), Google Gemini, 
+    A unified generator supporting OpenAI (GPT-4o, GPT-4, etc.), Google Gemini,
     Anthropic Claude, and Hugging Face models with optional concurrency.
     """
-    
+
     def __init__(
         self,
         models_file: str = "models.yaml",
@@ -184,7 +214,7 @@ class Generation:
         max_workers: int = 4,
     ):
         """
-        A unified generator supporting OpenAI (GPT-4o, GPT-4, etc.), Google Gemini, 
+        A unified generator supporting OpenAI (GPT-4o, GPT-4, etc.), Google Gemini,
         Anthropic Claude, and Hugging Face models with optional concurrency.
 
         Args:
@@ -194,7 +224,9 @@ class Generation:
             max_workers: Number of threads for concurrent generation.
         """
 
-        self.models, self.credentials = load_models_and_credentials(models_file, credentials_file)
+        self.models, self.credentials = load_models_and_credentials(
+            models_file, credentials_file
+        )
 
         self.model_name = model_name
         self.device = validate_device(device)
@@ -224,7 +256,7 @@ class Generation:
             self._closed = True
 
     def __del__(self):
-        if hasattr(self, '_closed') and not self._closed:
+        if hasattr(self, "_closed") and not self._closed:
             self.close()
 
     def _cleanup_hf_model(self):
@@ -239,7 +271,7 @@ class Generation:
             del self.generator
             self.generator = None
         self.hf_model_name = None
-        
+
         # Force garbage collection to free GPU memory
         if torch is not None and torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -247,7 +279,12 @@ class Generation:
 
     def _load_hf_model_and_tokenizer(self, model_name):
         """Load HuggingFace model with proper error handling and cleanup."""
-        if torch is None or AutoModelForCausalLM is None or AutoTokenizer is None or pipeline is None:
+        if (
+            torch is None
+            or AutoModelForCausalLM is None
+            or AutoTokenizer is None
+            or pipeline is None
+        ):
             raise RuntimeError(
                 "Local Hugging Face models require 'torch' and 'transformers'. "
                 "Install them (e.g. pip install torch transformers) or use a non-local provider via LiteLLM."
@@ -255,29 +292,33 @@ class Generation:
         with self._model_lock:  # Thread safety
             if self.hf_model_name == model_name and self.hf_model is not None:
                 return  # Model already loaded
-            
+
             # Clean up previous model
             self._cleanup_hf_model()
-            
+
             try:
                 self.hf_model_name = model_name
                 self.hf_model = AutoModelForCausalLM.from_pretrained(model_name)
                 self.hf_model.to(self.device)
                 self.hf_tokenizer = AutoTokenizer.from_pretrained(model_name)
-                
+
                 # Set pad_token if not exists
                 if self.hf_tokenizer.pad_token is None:
                     self.hf_tokenizer.pad_token = self.hf_tokenizer.eos_token
-                
+
                 self.generator = pipeline(
                     "text-generation",
                     model=self.hf_model,
                     tokenizer=self.hf_tokenizer,
-                    device=0 if isinstance(self.device, int) or self.device == "cuda" else -1,
+                    device=0
+                    if isinstance(self.device, int) or self.device == "cuda"
+                    else -1,
                 )
             except Exception as e:
                 self._cleanup_hf_model()
-                raise RuntimeError(f"Failed to load HuggingFace model {model_name}: {e}")
+                raise RuntimeError(
+                    f"Failed to load HuggingFace model {model_name}: {e}"
+                )
 
     @weave.op()
     def generate(
@@ -306,18 +347,20 @@ class Generation:
             model_name = self.model_name
         if model_name is None:
             raise ValueError("model_name is required")
-        
+
         if prompt is None and messages is None:
             raise ValueError("Either prompt or messages must be provided")
-        
+
         if prompt is not None and messages is not None:
             raise ValueError("Cannot provide both prompt and messages")
-        
+
         model_config = load_model_config(model_name, self.models, self.credentials)
 
         if model_config["provider"] == "local":
             if messages is not None:
-                raise NotImplementedError("Local models only support prompt generation currently.")
+                raise NotImplementedError(
+                    "Local models only support prompt generation currently."
+                )
             if not prompt or not prompt.strip():
                 raise ValueError("Prompt cannot be empty for local models")
             return self._generate_hf(
@@ -325,14 +368,14 @@ class Generation:
                 prompt=prompt,
                 **kwargs,
             )
-        
+
         return self._generate_litellm(
             model_config=model_config,
             prompt=prompt,
             messages=messages,
             **kwargs,
         )
-    
+
     @weave.op()
     def _generate_litellm(
         self,
@@ -350,20 +393,20 @@ class Generation:
         for k, v in __call_args.items():
             if k not in kwargs:
                 kwargs[k] = v
-        
+
         # Handle O-series models which have specific parameter requirements
         model_id = f"{model_config['provider']}/{model_config['model']}"
-        if any(o_model in model_id.lower() for o_model in ['o1', 'o2', 'o3', 'o4']):
+        if any(o_model in model_id.lower() for o_model in ["o1", "o2", "o3", "o4"]):
             # O-series models only support temperature=1
-            kwargs['temperature'] = 1.0
+            kwargs["temperature"] = 1.0
             # Drop unsupported parameters to avoid errors
-            kwargs['drop_params'] = True
-        
+            kwargs["drop_params"] = True
+
         if messages is None:
             if prompt is None:
                 raise ValueError("Either prompt or messages must be provided")
             messages = [{"role": "user", "content": prompt}]
-        
+
         try:
             response = litellm.completion(
                 model=model_id,
@@ -372,9 +415,13 @@ class Generation:
                 **kwargs,
             )
         except Exception as e:
-            raise RuntimeError(f"LiteLLM generation failed for model {model_name}") from e
+            raise RuntimeError(
+                f"LiteLLM generation failed for model {model_name}"
+            ) from e
 
-        text, reasoning = _extract_text_and_reasoning_from_message(response.choices[0].message)
+        text, reasoning = _extract_text_and_reasoning_from_message(
+            response.choices[0].message
+        )
         if text is None:
             text = ""
         result: Dict[str, Any] = {
@@ -391,7 +438,7 @@ class Generation:
             },
         }
         return result
-    
+
     @weave.op()
     def _generate_hf(
         self,
@@ -409,17 +456,19 @@ class Generation:
 
         max_tokens = kwargs.get("max_tokens", None)
         max_length = None
-        
+
         if max_tokens is not None:
             try:
                 input_length = len(self.hf_tokenizer(prompt).input_ids)
                 max_length = input_length + max_tokens
-                
+
                 # Validate against model's maximum length
-                model_max_length = getattr(self.hf_tokenizer, 'model_max_length', None)
+                model_max_length = getattr(self.hf_tokenizer, "model_max_length", None)
                 if model_max_length is not None and max_length > model_max_length:
-                    raise ValueError(f"Requested max_length ({max_length}) exceeds model's maximum ({model_max_length})")
-                    
+                    raise ValueError(
+                        f"Requested max_length ({max_length}) exceeds model's maximum ({model_max_length})"
+                    )
+
             except Exception as e:
                 raise ValueError(f"Error calculating max_length: {e}")
 
@@ -431,10 +480,10 @@ class Generation:
                 **kwargs,
             )
             generated = outputs[0]["generated_text"]
-            
+
             # Extract only the newly generated part
-            new_text = generated[len(prompt):].strip()
-            
+            new_text = generated[len(prompt) :].strip()
+
             return {
                 "output": {
                     "text": new_text,
@@ -447,7 +496,9 @@ class Generation:
                 },
             }
         except Exception as e:
-            raise RuntimeError(f"HuggingFace generation failed for model {model_config['model']}: {e}")
+            raise RuntimeError(
+                f"HuggingFace generation failed for model {model_config['model']}: {e}"
+            )
 
     async def generate_async(
         self,
@@ -461,11 +512,10 @@ class Generation:
         """
         if self._closed:
             raise RuntimeError("Generator has been closed")
-            
+
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(
-            self.executor,
-            lambda: self.generate(prompt, messages, model_name, **kwargs)
+            self.executor, lambda: self.generate(prompt, messages, model_name, **kwargs)
         )
 
     async def generate_batch_async(
@@ -487,9 +537,9 @@ class Generation:
         """
         if not prompts:
             return []
-            
+
         tasks = [
-            self.generate_async(p, messages=None, model_name=model_name, **kwargs) 
+            self.generate_async(p, messages=None, model_name=model_name, **kwargs)
             for p in prompts
         ]
         return await asyncio.gather(*tasks)
@@ -498,20 +548,25 @@ class Generation:
         """
         List all available models by provider.
         """
-        raise NotImplementedError("This class supports almost all models via LiteLLM. You just need to set the model name in models.yaml and credentials in credentials.yaml.")
+        raise NotImplementedError(
+            "This class supports almost all models via LiteLLM. You just need to set the model name in models.yaml and credentials in credentials.yaml."
+        )
 
 
 if __name__ == "__main__":
     # Initialize weave for testing this module only
     weave.init("generation_module_test")
-    
+
     # Initialize with multiple providers
     with Generation(max_workers=8) as gen:
-        
         # Test different models
         prompts = ["Hello world!"]
-        models = ["openai/gpt-4o-2024-08-06","openai/gpt-4.1-nano-2025-04-14", "huggingface/Qwen/Qwen3-0.6B"]
-        
+        models = [
+            "openai/gpt-4o-2024-08-06",
+            "openai/gpt-4.1-nano-2025-04-14",
+            "huggingface/Qwen/Qwen3-0.6B",
+        ]
+
         async def test_models():
             for model in models:
                 try:
@@ -522,6 +577,6 @@ if __name__ == "__main__":
                 except Exception as e:
                     print(f"  Error with {model}: {e}")
                     raise e
-        
+
         # Run async test
         asyncio.run(test_models())
