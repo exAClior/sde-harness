@@ -1,6 +1,6 @@
 import asyncio
 import threading
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import yaml
 from copy import deepcopy
 import gc
@@ -28,6 +28,65 @@ def _get_message_field(message: Any, field: str) -> Any:
     if isinstance(message, dict):
         return message.get(field)
     return getattr(message, field, None)
+
+
+def _aggregate_stream_chunks(
+    response_stream,
+    on_chunk: Optional[Callable[[str], None]] = None,
+) -> Tuple[str, Optional[str], Optional[dict], Optional[str]]:
+    """
+    Iterate streaming response, aggregate text/reasoning/usage.
+
+    Args:
+        response_stream: Iterable of streaming chunks from litellm.
+        on_chunk: Optional callback invoked with each text delta.
+
+    Returns:
+        (text, reasoning, usage_dict, finish_reason)
+    """
+    text_parts: List[str] = []
+    reasoning_parts: List[str] = []
+    usage = None
+    finish_reason = None
+
+    for chunk in response_stream:
+        if not chunk.choices:
+            continue
+
+        choice = chunk.choices[0]
+        delta = choice.delta
+
+        # Extract text content
+        content = getattr(delta, "content", None)
+        if content:
+            text_parts.append(content)
+            if on_chunk is not None:
+                on_chunk(content)
+
+        # Extract reasoning content (Claude, DeepSeek, etc.)
+        reasoning_content = getattr(delta, "reasoning_content", None)
+        if reasoning_content:
+            reasoning_parts.append(reasoning_content)
+
+        # Check for finish reason
+        if choice.finish_reason:
+            finish_reason = choice.finish_reason
+
+        # Extract usage from final chunk (with stream_options)
+        if hasattr(chunk, "usage") and chunk.usage is not None:
+            try:
+                usage = (
+                    chunk.usage.model_dump()
+                    if hasattr(chunk.usage, "model_dump")
+                    else dict(chunk.usage)
+                )
+            except Exception:
+                pass
+
+    text = "".join(text_parts)
+    reasoning = "".join(reasoning_parts) if reasoning_parts else None
+
+    return text, reasoning, usage, finish_reason
 
 
 def _extract_text_and_reasoning_from_message(
@@ -326,6 +385,8 @@ class Generation:
         prompt: Optional[str] = None,
         messages: Optional[List[Dict[str, str]]] = None,
         model_name: Optional[str] = None,
+        on_chunk: Optional[Callable[[str], None]] = None,
+        stream: bool = True,
         **kwargs,
     ) -> Dict[str, Any]:
         """
@@ -335,6 +396,8 @@ class Generation:
             prompt: Input prompt string.
             messages: List of message dictionaries for chat models.
             model_name: Model identifier that you set in models.yaml.
+            on_chunk: Optional callback invoked with each text delta during streaming.
+            stream: Whether to use streaming (default True). Local HF models ignore this.
             **kwargs: Additional model-specific arguments.
 
         Returns:
@@ -357,6 +420,7 @@ class Generation:
         model_config = load_model_config(model_name, self.models, self.credentials)
 
         if model_config["provider"] == "local":
+            # Local HF models don't support streaming currently
             if messages is not None:
                 raise NotImplementedError(
                     "Local models only support prompt generation currently."
@@ -373,6 +437,8 @@ class Generation:
             model_config=model_config,
             prompt=prompt,
             messages=messages,
+            on_chunk=on_chunk,
+            stream=stream,
             **kwargs,
         )
 
@@ -390,10 +456,23 @@ class Generation:
         model_config,
         prompt: Optional[str] = None,
         messages: Optional[List[Dict[str, str]]] = None,
+        on_chunk: Optional[Callable[[str], None]] = None,
+        stream: bool = True,
         **kwargs,
     ) -> Dict[str, Any]:
         """
         Internal method to generate text using LiteLLM.
+
+        Args:
+            model_config: Model configuration dict.
+            prompt: Input prompt string.
+            messages: List of message dicts for chat models.
+            on_chunk: Optional callback invoked with each text delta during streaming.
+            stream: Whether to use streaming (default True).
+            **kwargs: Additional model-specific arguments.
+
+        Returns:
+            Dict with 'output' (text, reasoning) and 'metadata'.
         """
         model_name = model_config["model_name"]
 
@@ -405,6 +484,7 @@ class Generation:
         model_id = f"{model_config['provider']}/{model_config['model']}"
 
         # Use Responses API for OpenAI o-series models to get reasoning summaries
+        # (streaming not supported for Responses API currently)
         if self._is_openai_o_series(model_id):
             return self._generate_openai_responses_api(
                 model_config=model_config,
@@ -420,22 +500,39 @@ class Generation:
             messages = [{"role": "user", "content": prompt}]
 
         try:
-            response = litellm.completion(
-                model=model_id,
-                messages=messages,
-                **model_config["credentials"],
-                **kwargs,
-            )
+            if stream:
+                # Streaming mode (default)
+                response_stream = litellm.completion(
+                    model=model_id,
+                    messages=messages,
+                    stream=True,
+                    stream_options={"include_usage": True},
+                    **model_config["credentials"],
+                    **kwargs,
+                )
+                text, reasoning, usage, finish_reason = _aggregate_stream_chunks(
+                    response_stream, on_chunk=on_chunk
+                )
+            else:
+                # Non-streaming mode (fallback)
+                response = litellm.completion(
+                    model=model_id,
+                    messages=messages,
+                    **model_config["credentials"],
+                    **kwargs,
+                )
+                text, reasoning = _extract_text_and_reasoning_from_message(
+                    response.choices[0].message
+                )
+                if text is None:
+                    text = ""
+                usage = response.usage.model_dump() if response.usage else None
+                finish_reason = response.choices[0].finish_reason
         except Exception as e:
             raise RuntimeError(
                 f"LiteLLM generation failed for model {model_name}"
             ) from e
 
-        text, reasoning = _extract_text_and_reasoning_from_message(
-            response.choices[0].message
-        )
-        if text is None:
-            text = ""
         result: Dict[str, Any] = {
             "output": {
                 "text": text,
@@ -445,8 +542,8 @@ class Generation:
                 "model_name": model_name,
                 "provider": model_config["provider"],
                 "model": model_config["model"],
-                "usage": response.usage.model_dump() if response.usage else None,
-                "finish_reason": response.choices[0].finish_reason,
+                "usage": usage,
+                "finish_reason": finish_reason,
             },
         }
         return result
@@ -614,17 +711,30 @@ class Generation:
         prompt: Optional[str] = None,
         messages: Optional[List[Dict[str, str]]] = None,
         model_name: Optional[str] = None,
+        on_chunk: Optional[Callable[[str], None]] = None,
+        stream: bool = True,
         **kwargs,
     ) -> Dict[str, Any]:
         """
         Asynchronous wrapper for generate using ThreadPoolExecutor.
+
+        Args:
+            prompt: Input prompt string.
+            messages: List of message dicts for chat models.
+            model_name: Model identifier from models.yaml.
+            on_chunk: Optional callback invoked with each text delta during streaming.
+            stream: Whether to use streaming (default True).
+            **kwargs: Additional model-specific arguments.
         """
         if self._closed:
             raise RuntimeError("Generator has been closed")
 
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(
-            self.executor, lambda: self.generate(prompt, messages, model_name, **kwargs)
+            self.executor,
+            lambda: self.generate(
+                prompt, messages, model_name, on_chunk=on_chunk, stream=stream, **kwargs
+            ),
         )
 
     async def generate_batch_async(
