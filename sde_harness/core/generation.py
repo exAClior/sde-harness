@@ -530,7 +530,7 @@ class Generation:
                 finish_reason = response.choices[0].finish_reason
         except Exception as e:
             raise RuntimeError(
-                f"LiteLLM generation failed for model {model_name}"
+                f"LiteLLM generation failed for model {model_name}: {e}"
             ) from e
 
         result: Dict[str, Any] = {
